@@ -26,7 +26,6 @@ plugins:
 	$(MAKE) -C contrib/stream
 	$(MAKE) -C contrib/polygon
 	$(MAKE) -C contrib/bitmexfeeder
-	$(MAKE) -C contrib/binancefeeder
 
 unittest:
 	go fmt ./...
