@@ -37,6 +37,10 @@ type Timeframe struct {
 	Duration time.Duration
 }
 
+type MultipleTimeframe struct {
+	Timeframes []*Timeframe
+}
+
 func (tf *Timeframe) PeriodsPerDay() int {
 	return int(Day / tf.Duration)
 }
@@ -49,6 +53,22 @@ func NewTimeframe(arg interface{}) (tf *Timeframe) {
 		return TimeframeFromString(v)
 	case int64:
 		return TimeframeFromDuration(time.Duration(v))
+	}
+	return nil
+}
+
+func NewTimeframes(args []string) (tfs *MultipleTimeframe) {
+	tfs = new(MultipleTimeframe)
+	var timeframes []*Timeframe
+	if len(args) > 0 {
+		for _, timeframe := range args {
+			arg := NewTimeframe(timeframe)
+			if arg != nil {
+				timeframes = append(timeframes, arg)
+			}
+		}
+		tfs.Timeframes = timeframes
+		return tfs
 	}
 	return nil
 }
