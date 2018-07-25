@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
+	"net/http"
 	"regexp"
 	"strconv"
 	"time"
@@ -23,6 +23,52 @@ var suffixBinanceDefs = map[string]string{
 	"H":   "h",
 	"D":   "d",
 	"W":   "w",
+}
+
+// ExchangeInfo exchange info
+type ExchangeInfo struct {
+	Timezone   string `json:"timezone"`
+	ServerTime int64  `json:"serverTime"`
+	RateLimits []struct {
+		RateLimitType string `json:"rateLimitType"`
+		Interval      string `json:"interval"`
+		Limit         int    `json:"limit"`
+	} `json:"rateLimits"`
+	ExchangeFilters []interface{} `json:"exchangeFilters"`
+	Symbols         []struct {
+		Symbol             string   `json:"symbol"`
+		Status             string   `json:"status"`
+		BaseAsset          string   `json:"baseAsset"`
+		BaseAssetPrecision int      `json:"baseAssetPrecision"`
+		QuoteAsset         string   `json:"quoteAsset"`
+		QuotePrecision     int      `json:"quotePrecision"`
+		OrderTypes         []string `json:"orderTypes"`
+		IcebergAllowed     bool     `json:"icebergAllowed"`
+		Filters            []struct {
+			FilterType       string `json:"filterType"`
+			MinPrice         string `json:"minPrice,omitempty"`
+			MaxPrice         string `json:"maxPrice,omitempty"`
+			TickSize         string `json:"tickSize,omitempty"`
+			MinQty           string `json:"minQty,omitempty"`
+			MaxQty           string `json:"maxQty,omitempty"`
+			StepSize         string `json:"stepSize,omitempty"`
+			MinNotional      string `json:"minNotional,omitempty"`
+			Limit            int    `json:"limit,omitempty"`
+			MaxNumAlgoOrders int    `json:"maxNumAlgoOrders,omitempty"`
+		} `json:"filters"`
+	} `json:"symbols"`
+}
+
+// Get JSON via http request and decodes it using NewDecoder. Sets target interface to decoded json
+func getJson(url string, target interface{}) error {
+	var myClient = &http.Client{Timeout: 10 * time.Second}
+	r, err := myClient.Get(url)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+
+	return json.NewDecoder(r.Body).Decode(target)
 }
 
 // For ConvertStringToFloat function and Run() function to making exiting easier
@@ -106,19 +152,20 @@ func appendIfMissing(slice []string, i string) ([]string, bool) {
 //Gets all symbols from binance
 func getAllSymbols(quoteAsset string) []string {
 	client := binance.NewClient("", "")
-	exchangeinfo, err := client.NewExchangeInfoService().Do(context.Background())
+	m := ExchangeInfo{}
+	err := getJson("https://api.binance.com/api/v1/exchangeInfo", &m)
 	symbol := make([]string, 0)
 	status := make([]string, 0)
 	validSymbols := make([]string, 0)
+	tradingSymbols := make([]string, 0)
 	quote := ""
 
 	if err != nil {
 		glog.Infof("Binance /exchangeInfo API error: %v", err)
-		symbols := []string{"BTC", "EOS", "ETH", "BNB", "TRX", "ONT", "XRP", "ADA",
-			"LTC", "BCC", "TUSD", "IOTA", "ETC", "ICX", "NEO", "XLM", "QTUM", "BCH"}
-		return symbols
+		tradingSymbols = []string{"BTC", "EOS", "ETH", "BNB", "TRX", "ONT", "XRP", "ADA",
+			"LTC", "BCC", "TUSD", "IOTA", "ETC", "ICX", "NEO", "XLM", "QTUM"}
 	} else {
-		for _, info := range exchangeinfo.Symbols {
+		for _, info := range m.Symbols {
 			quote = info.QuoteAsset
 			notRepeated := true
 			// Check if data is the right base currency and then check if it's already recorded
@@ -133,8 +180,16 @@ func getAllSymbols(quoteAsset string) []string {
 		//Check status and append to symbols list if valid
 		for index, s := range status {
 			if s == "TRADING" {
-				validSymbols = append(validSymbols, symbol[index])
+				tradingSymbols = append(tradingSymbols, symbol[index])
 			}
+		}
+	}
+
+	// Double check each symbol is working as intended
+	for _, s := range tradingSymbols {
+		_, err := client.NewKlinesService().Symbol(s + quoteAsset).Interval("1m").Do(context.Background())
+		if err == nil {
+			validSymbols = append(validSymbols, s)
 		}
 	}
 
@@ -270,6 +325,7 @@ func (bn *BinanceFetcher) Run() {
 			timeStart = timeStart.Add(-bn.baseTimeframe.Duration * 300)
 			if loopForever {
 				finalTime = time.Now().UTC()
+				timeEnd = finalTime
 			} else {
 				timeEnd = finalTime
 			}
@@ -294,9 +350,10 @@ func (bn *BinanceFetcher) Run() {
 
 			if err != nil {
 				glog.Errorf("Response error: %v", err)
+				glog.Infof("Problematic symbol %s", symbol)
 				time.Sleep(time.Minute)
 				// Go back to last time
-				timeStart = timeEnd.Add(-bn.baseTimeframe.Duration * 300)
+				timeStart = timeStart.Add(-bn.baseTimeframe.Duration * 300)
 				continue
 			}
 			if len(rates) == 0 {
@@ -334,17 +391,16 @@ func (bn *BinanceFetcher) Run() {
 			cs.AddColumn("Low", low)
 			cs.AddColumn("Close", close)
 			cs.AddColumn("Volume", volume)
-			// glog.Infof("%s: %d rates between %v - %v", symbol, len(rates),
-			// 	timeStart.String(), timeEnd.String())
 			csm := io.NewColumnSeriesMap()
 			tbk := io.NewTimeBucketKey(symbol + "/" + bn.baseTimeframe.String + "/OHLCV")
 			csm.AddColumnSeries(*tbk, cs)
 			executor.WriteCSM(csm, false)
 		}
 
-		//Sleep for a second before next call
+		// Sleep for half the timeframe
+		// Otherwise continue to call every second
 		if slowDown {
-			time.Sleep(30 * time.Second)
+			time.Sleep(bn.baseTimeframe.Duration / 2)
 		} else {
 			time.Sleep(time.Second)
 		}
@@ -353,18 +409,22 @@ func (bn *BinanceFetcher) Run() {
 }
 
 func main() {
-	symbol := "BTC"
-	interval := "1m"
-	baseCurrency := "USDT"
-
-	client := binance.NewClient("", "")
-	klines, err := client.NewKlinesService().Symbol(symbol + baseCurrency).
-		Interval(interval).Do(context.Background())
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	for _, k := range klines {
-		fmt.Println(k)
-	}
+	// symbol := "BTC"
+	// interval := "1m"
+	// baseCurrency := "USDT"
+	//
+	// client := binance.NewClient("", "")
+	// klines, err := client.NewKlinesService().Symbol(symbol + baseCurrency).
+	// 	Interval(interval).Do(context.Background())
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	return
+	// }
+	// for _, k := range klines {
+	// 	fmt.Println(k)
+	// }
+	// symbols := getAllSymbols("USDT")
+	// for _, s := range symbols {
+	// 	fmt.Println(s)
+	// }
 }
