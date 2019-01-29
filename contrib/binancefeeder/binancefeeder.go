@@ -335,7 +335,7 @@ func (bn *BinanceFetcher) Run() {
 			if isThereStartTime {
 				timeStarts[symbol] = bn.queryStart
 			} else {
-				// Default start current time minus duration
+				// Default value for timeStart for each symbol if not set is: start current time minus duration
 				timeStarts[symbol] = time.Now().UTC().Add(-bn.baseTimeframe.Duration)
 			}
 		}
@@ -349,13 +349,13 @@ func (bn *BinanceFetcher) Run() {
 
 	// For loop for collecting candlestick data forever
 	// Note that the max amount is 1000 candlesticks which is no problem
-	var timeStartM []int64
-	var timeEndM []int64
-	var timeEnd []time.Time
-	var originalTimeStart time.Time
-	var originalTimeEnd time.Time
-	var originalTimeEndZero []time.Time
-	var waitTill []time.Time
+	var timeStartM int64
+	var timeEndM int64
+	var timeEnds = make(map[string]time.Time)
+	var originalTimeStarts = make(map[string]time.Time)
+	var originalTimeEnds = make(map[string]time.Time)
+	var originalTimeEndZeros = make(map[string]time.Time)
+	var waitTills = make(map[string]time.Time)
 	firstLoop := true
 
 	var multiplier time.Duration = 394200
@@ -363,133 +363,139 @@ func (bn *BinanceFetcher) Run() {
 	updating := false
 
 	// Current iteration (symbol index)
-	var iteration = 0
+	// var iteration = 0
 
+	// yikes kinda looks messy smh
 	for {
 		// finalTime = time.Now().UTC()
-		originalTimeStart = timeStart[iteration]
-		originalTimeEnd = timeEnd[iteration]
-
-		// Check if it's finished backfilling. If not, just do 600 * Timeframe.duration
-		// only do beyond 1st loop
-		if !slowDown {
-			if !firstLoop {
-				timeStart = originalTimeEnd
-				timeEnd = timeStart.Add(bn.baseTimeframe.Duration * multiplier)
-			} else {
-				firstLoop = false
-				// Keep timeStart as original value
-				// need to multiply by 394200 if the start time is zero because Binance's API doesn't allow for any difference that is lower. Big yikes
-				timeEnd = timeStart.Add(bn.baseTimeframe.Duration * multiplier)
-				multiplier = 300
-			}
-			// Makes sense for 1 minute time frame but not for larger ones...
-			// TODO: Makes it so that it works for all timeframes
-			// if timeStart.After(time.Now().UTC()) {
-			// 	timeStart = originalTimeEnd
-			// 	timeEnd = time.Now().UTC()
-			// 	// Check multiplier
-			// 	// If multiplier is bigger than 1, make it smaller until need be
-			// 	if multiplier == 1 {
-			// 		slowDown = true
-			// 	} else {
-			// 		multiplier /= 2
-			// 	}
-			// }
-
-			// Do the same as above
-			if timeEnd.After(time.Now().UTC()) {
-				timeEnd = time.Now().UTC()
-				// Check multiplier
-				// If multiplier is bigger than 1, make it one now so that it increments only by 1 for the next one and then move on.
-				if multiplier != 1 {
-					multiplier = 1
-				} else {
-					slowDown = true
-				}
-			}
-		} else {
-			// Set to the :00 of previous TimeEnd to ensure that the complete candle that was not formed before is written
-			originalTimeEnd = originalTimeEndZero
-		}
-
-		// Sleep for the timeframe
-		// Otherwise continue to call every second to backfill the data
-		// Slow Down for 1 Duration period
-		// Make sure last candle is formed
-		if slowDown {
-			timeEnd = time.Now().UTC()
-			timeStart = originalTimeEnd
-
-			year := timeEnd.Year()
-			month := timeEnd.Month()
-			day := timeEnd.Day()
-			hour := timeEnd.Hour()
-			minute := timeEnd.Minute()
-
-			// To prevent gaps (ex: querying between 1:31 PM and 2:32 PM (hourly)would not be ideal)
-			// But we still want to wait 1 candle afterwards (ex: 1:01 PM (hourly))
-			// If it is like 1:59 PM, the first wait sleep time will be 1:59, but afterwards would be 1 hour.
-			// Main goal is to ensure it runs every 1 <time duration> at :00
-			switch originalInterval {
-			case "1Min":
-				timeEnd = time.Date(year, month, day, hour, minute, 0, 0, time.UTC)
-			case "1H":
-				timeEnd = time.Date(year, month, day, hour, 0, 0, 0, time.UTC)
-			case "1D":
-				timeEnd = time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-			default:
-				fmt.Printf("Incorrect format: %v\n", originalInterval)
-			}
-			waitTill = timeEnd.Add(bn.baseTimeframe.Duration)
-
-			timeStartM := timeStart.UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
-			timeEndM := timeEnd.UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
-
-			// Make sure you get the last candle within the timeframe.
-			// If the next candle is in the API call, that means the previous candle has been fully formed
-			// (ex: if we see :00 is formed that means the :59 candle is fully formed)
-			gotCandle := false
-			for !gotCandle {
-				rates, err := client.NewKlinesService().Symbol(symbols[0] + baseCurrency).Interval(timeInterval).StartTime(timeStartM).Do(context.Background())
-				if err != nil {
-					fmt.Printf("Response error: %v\n", err)
-					time.Sleep(time.Minute)
-				}
-
-				if len(rates) > 0 && rates[len(rates)-1].OpenTime-timeEndM >= 0 {
-					gotCandle = true
-				}
-			}
-
-			originalTimeEndZero = timeEnd
-			// Change timeEnd to the correct time where the last candle is formed
-			timeEnd = time.Now().UTC()
-		}
-
-		// Repeat since slowDown loop won't run if it hasn't been past the current time
-		timeStartM = timeStart.UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
-		timeEndM = timeEnd.UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
-
 		for _, symbol := range symbols {
-			fmt.Printf("Requesting %s %v - %v\n", symbol, timeStart, timeEnd)
 
+			originalTimeStarts[symbol] = timeStarts[symbol]
+			originalTimeEnds[symbol] = timeEnds[symbol]
+
+			// Check if it's finished backfilling. If not, just do 600 * Timeframe.duration
+			// only do beyond 1st loop
+			if !slowDown {
+
+				if !firstLoop {
+					timeStarts[symbol] = originalTimeEnds[symbol]
+					timeEnds[symbol] = timeStarts[symbol].Add(bn.baseTimeframe.Duration * multiplier)
+				} else {
+					firstLoop = false
+					// Keep timeStart as original value
+					// need to multiply by 394200 if the start time is zero because Binance's API doesn't allow for any difference that is lower. Big yikes
+					timeEnds[symbol] = timeStarts[symbol].Add(bn.baseTimeframe.Duration * multiplier)
+					multiplier = 300
+				}
+				// Makes sense for 1 minute time frame but not for larger ones...
+				// TODO: Makes it so that it works for all timeframes
+				// if timeStart.After(time.Now().UTC()) {
+				// 	timeStart = originalTimeEnd
+				// 	timeEnd = time.Now().UTC()
+				// 	// Check multiplier
+				// 	// If multiplier is bigger than 1, make it smaller until need be
+				// 	if multiplier == 1 {
+				// 		slowDown = true
+				// 	} else {
+				// 		multiplier /= 2
+				// 	}
+				// }
+
+				// Do the same as above
+				if timeEnds[symbol].After(time.Now().UTC()) {
+					timeEnds[symbol] = time.Now().UTC()
+					// Check multiplier
+					// If multiplier is bigger than 1, make it one now so that it increments only by 1 for the next one and then move on.
+					// Change multiplier to 1 since in theory we are getting to the most recent candle right now
+					multiplier = 1
+					slowDown = true
+
+					// if multiplier != 1 {
+					// } else {
+					// 	// Slow down after we go through once with a multiplier of 1
+					// }
+				}
+			} else {
+				// Set to the :00 of previous TimeEnd to ensure that the complete candle that was not formed before is written
+				originalTimeEnds[symbol] = originalTimeEndZeros[symbol]
+			}
+
+			// Sleep for the timeframe
+			// Otherwise continue to call every second to backfill the data
+			// Slow Down for 1 Duration period
+			// Make sure last candle is formed
+			if slowDown {
+				timeEnds[symbol] = time.Now().UTC()
+				timeStarts[symbol] = originalTimeEnds[symbol]
+
+				year := timeEnds[symbol].Year()
+				month := timeEnds[symbol].Month()
+				day := timeEnds[symbol].Day()
+				hour := timeEnds[symbol].Hour()
+				minute := timeEnds[symbol].Minute()
+
+				// To prevent gaps (ex: querying between 1:31 PM and 2:32 PM (hourly)would not be ideal)
+				// But we still want to wait 1 candle afterwards (ex: 1:01 PM (hourly))
+				// If it is like 1:59 PM, the first wait sleep time will be 1:59, but afterwards would be 1 hour.
+				// Main goal is to ensure it runs every 1 <time duration> at :00
+				switch originalInterval {
+				case "1Min":
+					timeEnds[symbol] = time.Date(year, month, day, hour, minute, 0, 0, time.UTC)
+				case "1H":
+					timeEnds[symbol] = time.Date(year, month, day, hour, 0, 0, 0, time.UTC)
+				case "1D":
+					timeEnds[symbol] = time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+				default:
+					fmt.Printf("Incorrect format: %v\n", originalInterval)
+				}
+				waitTills[symbol] = timeEnds[symbol].Add(bn.baseTimeframe.Duration)
+
+				timeStartM := timeStarts[symbol].UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
+				timeEndM := timeEnds[symbol].UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
+
+				// Make sure you get the last candle within the timeframe.
+				// If the next candle is in the API call, that means the previous candle has been fully formed
+				// (ex: if we see :00 is formed that means the :59 candle is fully formed)
+				gotCandle := false
+				for !gotCandle {
+					rates, err := client.NewKlinesService().Symbol(symbols[0] + baseCurrency).Interval(timeInterval).StartTime(timeStartM).Do(context.Background())
+					if err != nil {
+						fmt.Printf("Response error: %v\n", err)
+						time.Sleep(time.Minute)
+					}
+
+					if len(rates) > 0 && rates[len(rates)-1].OpenTime-timeEndM >= 0 {
+						gotCandle = true
+					}
+				}
+
+				originalTimeEndZeros[symbol] = timeEnds[symbol]
+				// Change timeEnd to the correct time where the last candle is formed
+				timeEnds[symbol] = time.Now().UTC()
+			}
+
+			// Repeat since slowDown loop won't run if it hasn't been past the current time
+			timeStartM = timeStarts[symbol].UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
+			timeEndM = timeEnds[symbol].UnixNano() / (int64(time.Millisecond) / int64(time.Nanosecond))
+
+			fmt.Printf("Requesting %s %v - %v\n", symbol, timeStarts[symbol], timeEnds[symbol])
+
+			// Grab price data
 			rates, err := client.NewKlinesService().Symbol(symbol + baseCurrency).Interval(timeInterval).StartTime(timeStartM).EndTime(timeEndM).Do(context.Background())
 			// fmt.Printf("rates %v\n", rates)
 
 			// For some reason Binance, doesn't allow for small time differences between starttimes and endtimes in some cases (seemingly in the beginning)
 			// If that is the case, get as many candles as possible.
-			if rates == nil {
-				fmt.Printf("Empty s: %v v: %v\n", timeStartM, timeEndM)
-				rates, err = client.NewKlinesService().Symbol(symbol + baseCurrency).Interval(timeInterval).StartTime(timeStartM).Do(context.Background())
-			}
+			// if rates == nil {
+			// 	fmt.Printf("Empty s: %v v: %v\n", timeStartM, timeEndM)
+			// 	rates, err = client.NewKlinesService().Symbol(symbol + baseCurrency).Interval(timeInterval).StartTime(timeStartM).Do(context.Background())
+			// }
 
 			if err != nil {
 				fmt.Printf("Response error: %v\n", err)
-				fmt.Printf("Problematic symbol %s\n", symbol)
-				time.Sleep(time.Minute)
+				// time.Sleep(time.Minute)
 				// Go back to last time
-				timeStart = originalTimeStart
+				timeStarts[symbol] = originalTimeStarts[symbol]
 				// Check error message if it contains
 				if strings.Contains(err.Error(), "network is unreachable") {
 					updating = true
@@ -500,82 +506,94 @@ func (bn *BinanceFetcher) Run() {
 			// 	fmt.Printf("len(rates) == 0\n")
 			// 	continue
 			// }
+			if !updating {
+				openTime := make([]int64, 0)
+				open := make([]float64, 0)
+				high := make([]float64, 0)
+				low := make([]float64, 0)
+				close := make([]float64, 0)
+				volume := make([]float64, 0)
 
-			openTime := make([]int64, 0)
-			open := make([]float64, 0)
-			high := make([]float64, 0)
-			low := make([]float64, 0)
-			close := make([]float64, 0)
-			volume := make([]float64, 0)
+				for _, rate := range rates {
+					errorsConversion = errorsConversion[:0]
+					// fmt.Printf("rate %v\n", rate)
+					// if nil, do not append to list
+					if rate.OpenTime != 0 && rate.Open != "" &&
+						rate.High != "" && rate.Low != "" &&
+						rate.Close != "" && rate.Volume != "" {
+						openTime = append(openTime, convertMillToTime(rate.OpenTime).Unix())
+						open = append(open, convertStringToFloat(rate.Open))
+						high = append(high, convertStringToFloat(rate.High))
+						low = append(low, convertStringToFloat(rate.Low))
+						close = append(close, convertStringToFloat(rate.Close))
+						volume = append(volume, convertStringToFloat(rate.Volume))
 
-			for _, rate := range rates {
-				errorsConversion = errorsConversion[:0]
-				// fmt.Printf("rate %v\n", rate)
-				// if nil, do not append to list
-				if rate.OpenTime != 0 && rate.Open != "" &&
-					rate.High != "" && rate.Low != "" &&
-					rate.Close != "" && rate.Volume != "" {
-					openTime = append(openTime, convertMillToTime(rate.OpenTime).Unix())
-					open = append(open, convertStringToFloat(rate.Open))
-					high = append(high, convertStringToFloat(rate.High))
-					low = append(low, convertStringToFloat(rate.Low))
-					close = append(close, convertStringToFloat(rate.Close))
-					volume = append(volume, convertStringToFloat(rate.Volume))
-
-					for _, e := range errorsConversion {
-						if e != nil {
-							return
+						for _, e := range errorsConversion {
+							if e != nil {
+								return
+							}
 						}
+					} else {
+						fmt.Printf("No value in rate %v\n", rate)
 					}
+				}
+
+				validWriting := true
+				if len(openTime) == 0 || len(open) == 0 || len(high) == 0 || len(low) == 0 || len(close) == 0 || len(volume) == 0 {
+					validWriting = false
+				}
+				// if data is nil, do not write to csm
+				if validWriting {
+					cs := io.NewColumnSeries()
+					// Remove last incomplete candle if it exists since that is incomplete
+					// Since all are the same length we can just check one
+					// We know that the last one on the list is the incomplete candle because in
+					// the gotCandle loop we only move on when the incomplete candle appears which is the last entry from the API
+					if slowDown && len(openTime) > 1 {
+						openTime = openTime[:len(openTime)-1]
+						open = open[:len(open)-1]
+						high = high[:len(high)-1]
+						low = low[:len(low)-1]
+						close = close[:len(close)-1]
+						volume = volume[:len(volume)-1]
+					}
+
+					cs.AddColumn("Epoch", openTime)
+					cs.AddColumn("Open", open)
+					cs.AddColumn("High", high)
+					cs.AddColumn("Low", low)
+					cs.AddColumn("Close", close)
+					cs.AddColumn("Volume", volume)
+					csm := io.NewColumnSeriesMap()
+					tbk := io.NewTimeBucketKey(symbol + "/" + bn.baseTimeframe.String + "/OHLCV")
+					csm.AddColumnSeries(*tbk, cs)
+					executor.WriteCSM(csm, false)
+				}
+			}
+
+			// IF Binance is updating their API, sleep for an hour and wait till it's complete...
+			// Keep checking every hour until update is finished
+			if updating {
+				finishedUpdating := false
+				for !finishedUpdating {
+					_, err := client.NewKlinesService().Symbol(symbol).Interval(timeInterval).StartTime(timeStartM).Do(context.Background())
+					if err != nil {
+						fmt.Printf("Response error: %v\n", err)
+						time.Sleep(time.Hour)
+					} else {
+						finishedUpdating = true
+					}
+				}
+			} else {
+				if slowDown {
+					// Sleep till next :00 time
+					time.Sleep(waitTills[symbol].Sub(time.Now().UTC()))
 				} else {
-					fmt.Printf("No value in rate %v\n", rate)
+					// Binance rate limit is 20 reequests per second so this shouldn't be an issue.
+					time.Sleep(time.Second)
 				}
 			}
 
-			validWriting := true
-			if len(openTime) == 0 || len(open) == 0 || len(high) == 0 || len(low) == 0 || len(close) == 0 || len(volume) == 0 {
-				validWriting = false
-			}
-			// if data is nil, do not write to csm
-			if validWriting {
-				cs := io.NewColumnSeries()
-				// Remove last incomplete candle if it exists since that is incomplete
-				// Since all are the same length we can just check one
-				// We know that the last one on the list is the incomplete candle because in
-				// the gotCandle loop we only move on when the incomplete candle appears which is the last entry from the API
-				if slowDown && len(openTime) > 1 {
-					openTime = openTime[:len(openTime)-1]
-					open = open[:len(open)-1]
-					high = high[:len(high)-1]
-					low = low[:len(low)-1]
-					close = close[:len(close)-1]
-					volume = volume[:len(volume)-1]
-				}
-
-				cs.AddColumn("Epoch", openTime)
-				cs.AddColumn("Open", open)
-				cs.AddColumn("High", high)
-				cs.AddColumn("Low", low)
-				cs.AddColumn("Close", close)
-				cs.AddColumn("Volume", volume)
-				csm := io.NewColumnSeriesMap()
-				tbk := io.NewTimeBucketKey(symbol + "/" + bn.baseTimeframe.String + "/OHLCV")
-				csm.AddColumnSeries(*tbk, cs)
-				executor.WriteCSM(csm, false)
-			}
-
-		}
-
-		if slowDown {
-			// Sleep till next :00 time
-			time.Sleep(waitTill.Sub(time.Now().UTC()))
-		} else {
-			// Binance rate limit is 20 reequests per second so this shouldn't be an issue.
-			time.Sleep(time.Second)
-		}
-
-		if updating {
-			time.Sleep(time.Hour)
 		}
 
 	}
